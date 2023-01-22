@@ -35,10 +35,10 @@ can-bit-timings= "1.1.0"
 kangoo_battery = {git = "https://github.com/rand12345/kangoo_battery.git", branch = "testing", feature="defmt"}
 embedded-alloc = "0.5.0"
 embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "255f5cb3db6b928578b94f22c3f00da601807475", features = ["defmt", "integrated-timers"]  } # version = "0.1.0", 
-# embedded-sdmmc-async = { git = "https://github.com/ninjasource/embedded-sdmmc-rs.git", branch = "add-async-support", features = ["defmt-log"], default-features = false }
+embedded-sdmmc-async = { git = "https://github.com/ninjasource/embedded-sdmmc-rs.git", branch = "add-async-support", features = ["defmt-log"], default-features = false }
 embedded-hal-async = { version = "=0.2.0-alpha.0"}
 # embedded-hal = "0.2.7"
-embedded-sdmmc = {git = "https://github.com/pferreir/embedded-sdmmc-rs.git", branch= "async-new",  features = ["defmt-log"], default-features = false }
+# embedded-sdmmc = {git = "https://github.com/pferreir/embedded-sdmmc-rs.git", branch= "async-new",  features = ["defmt-log"], default-features = false }
 heapless = "0.7"
 static_cell = "1.0.0"
 embassy-futures = { version = "0.1.0", features = ["defmt"]}

@@ -18,13 +18,15 @@ use embassy_stm32::gpio::{Input, Pull};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::peripherals::*;
 use embassy_stm32::spi::{Config, Spi};
-use embassy_stm32::time::mhz;
+use embassy_stm32::time::{mhz, Hertz};
 
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use embedded_alloc::Heap;
-use embedded_sdmmc::{BlockSpi, Controller, Mode, SdMmcSpi, VolumeIdx};
+use embedded_sdmmc_async::{
+    BlockSpi, Controller, Mode, SdMmcSpi, TimeSource, Timestamp, VolumeIdx,
+};
 use heapless::{Deque, String, Vec};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -40,9 +42,17 @@ static HEAP: Heap = Heap::empty();
 static CHANNEL: StaticCell<Channel<ThreadModeRawMutex, heapless::Vec<u8, 512>, 3>> =
     StaticCell::new();
 
+/*
+p.SPI1,
+        p.PB3,
+        p.PB5,
+        p.PB4,
+        p.DMA2_CH3,
+        p.DMA2_CH2,
+*/
 #[embassy_executor::task]
 async fn run_sdcard(
-    mut spi_dev: SdMmcSpi<Spi<'static, SPI3, NoDma, NoDma>, Output<'static, PE0>>,
+    mut spi_dev: SdMmcSpi<Spi<'static, SPI1, DMA2_CH3, DMA2_CH2>, Output<'static, PE0>>,
     switch1: PE4,
     led: PA6,
     file_name: String<12>,
@@ -53,7 +63,7 @@ async fn run_sdcard(
     match spi_dev.acquire().await {
         Ok(block) => {
             let mut sd_controller: Controller<
-                BlockSpi<Spi<SPI3, NoDma, NoDma>, Output<PE0>>,
+                BlockSpi<Spi<SPI1, DMA2_CH3, DMA2_CH2>, Output<PE0>>,
                 Clock,
                 4,
                 4,
@@ -116,7 +126,7 @@ async fn run_sdcard(
             sd_controller.close_dir(&volume, dir);
             info!("Closed dir");
             loop {
-                yield_now().await;
+                delay_ms(2).await;
             }
         }
         Err(_) => defmt::panic!("sd card did not init"),
@@ -154,6 +164,7 @@ async fn run_can(
         // don't forget awaits
         // yield_now().await;
 
+        led.set_low();
         if switch.is_low() && enable {
             enable = false;
             warn!("Can disabled");
@@ -212,10 +223,8 @@ async fn run_can(
                 .saturating_sub(st.len())
                 == 0
             {
-                if let Ok(output) = Vec::from_slice(&buffer) {
-                    sender.send(output).await;
-                }
-                buffer.clear();
+                sender.send(Vec::clone(&buffer)).await;
+                buffer.clear()
             }
             buffer.extend_from_slice(st.as_bytes()).unwrap();
             st.clear();
@@ -235,19 +244,29 @@ async fn main(spawner: Spawner) -> ! {
     let mut p = embassy_stm32::init(config);
     debug!("Can test");
 
-    let mut cs = Output::new(p.PE0, Level::High, Speed::VeryHigh);
+    let cs = Output::new(p.PE0, Level::High, Speed::VeryHigh);
 
-    let mut spi = embassy_stm32::spi::Spi::new(
-        p.SPI3,
-        p.PC10,
-        p.PC12,
-        p.PC11,
-        NoDma,
-        NoDma,
-        embassy_stm32::time::Hertz(12_000_000),
+    // let spi = Spi::new(
+    //     p.SPI3,
+    //     p.PC10,
+    //     p.PC12,
+    //     p.PC11,
+    //     NoDma,
+    //     NoDma,
+    //     Hertz(12_000_000),
+    //     Config::default(),
+    // );
+    let spi = Spi::new(
+        p.SPI1,
+        p.PB3,
+        p.PB5,
+        p.PB4,
+        p.DMA2_CH3,
+        p.DMA2_CH2,
+        Hertz(1_000_000),
         Config::default(),
     );
-    let mut spi_dev = embedded_sdmmc::SdMmcSpi::new(spi, cs);
+    let spi_dev = SdMmcSpi::new(spi, cs);
 
     let rx_pin = Input::new(&mut p.PD0, Pull::Up);
     core::mem::forget(rx_pin);
@@ -273,9 +292,9 @@ async fn main(spawner: Spawner) -> ! {
 
 struct Clock;
 
-impl embedded_sdmmc::TimeSource for Clock {
-    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
-        embedded_sdmmc::Timestamp {
+impl TimeSource for Clock {
+    fn get_timestamp(&self) -> Timestamp {
+        Timestamp {
             year_since_1970: 0,
             zero_indexed_month: 0,
             zero_indexed_day: 0,
