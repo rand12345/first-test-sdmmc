@@ -20,7 +20,9 @@ use embassy_stm32::peripherals::*;
 use embassy_stm32::spi::{Config, Spi};
 use embassy_stm32::time::{mhz, Hertz};
 
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex, ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::raw::{
+    CriticalSectionRawMutex, NoopRawMutex, ThreadModeRawMutex,
+};
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use embedded_alloc::Heap;
@@ -38,9 +40,13 @@ static HEAP: Heap = Heap::empty();
 //     embassy_sync::mutex::Mutex::new(Deque::<heapless::Vec<u8, 512>, 1>::new());
 // pub type BmsChannelMutexRx =
 //     embassy_sync::mutex::Mutex<ThreadModeRawMutex, Deque<heapless::Vec<u8, 512>, 1>>;
+const CHANNELDEPTH: usize = 1;
+const CHANNELBLOCKSIZE: usize = 1024;
+const BUFFERSIZE: usize = CHANNELBLOCKSIZE + 256;
 
-static CHANNEL: StaticCell<Channel<ThreadModeRawMutex, heapless::Vec<u8, 512>, 3>> =
-    StaticCell::new();
+static CHANNEL: StaticCell<
+    Channel<NoopRawMutex, heapless::Vec<u8, CHANNELBLOCKSIZE>, CHANNELDEPTH>,
+> = StaticCell::new();
 
 /*
 p.SPI1,
@@ -52,40 +58,42 @@ p.SPI1,
 */
 #[embassy_executor::task]
 async fn run_sdcard(
-    mut spi_dev: SdMmcSpi<Spi<'static, SPI1, DMA2_CH3, DMA2_CH2>, Output<'static, PE0>>,
+    mut spi_dev: SdMmcSpi<Spi<'static, SPI2, DMA1_CH4, DMA1_CH3>, Output<'static, PE0>>,
     switch1: PE4,
     led: PA6,
     file_name: String<12>,
-    receiver: Receiver<'static, ThreadModeRawMutex, heapless::Vec<u8, 512>, 3>,
+    receiver: Receiver<'static, NoopRawMutex, heapless::Vec<u8, CHANNELBLOCKSIZE>, CHANNELDEPTH>,
 ) {
     let mut led = Output::new(led, Level::High, Speed::VeryHigh);
     let switch1 = Input::new(switch1, Pull::Up);
     match spi_dev.acquire().await {
         Ok(block) => {
             let mut sd_controller: Controller<
-                BlockSpi<Spi<SPI1, DMA2_CH3, DMA2_CH2>, Output<PE0>>,
+                BlockSpi<Spi<SPI2, DMA1_CH4, DMA1_CH3>, Output<PE0>>,
                 Clock,
                 4,
                 4,
             > = Controller::new(block, Clock);
             info!("OK! Card size...");
+            led.set_high();
             match sd_controller.device().card_size_bytes().await {
                 Ok(size) => info!("{}", size),
                 Err(e) => warn!("Err: {:?}", e),
             }
+            led.set_low();
             info!("Volume 0...");
             match sd_controller.get_volume(VolumeIdx(0)).await {
                 Ok(v) => info!("{:?}", v),
                 Err(e) => info!("Err: {:?}", e),
             }
-
+            led.set_high();
             let mut volume = match sd_controller.get_volume(VolumeIdx(0)).await {
                 Ok(volume) => volume,
                 Err(e) => {
                     defmt::panic!("Error getting volume: {:?}", e);
                 }
             };
-
+            led.set_low();
             let dir = match sd_controller.open_root_dir(&volume) {
                 Ok(d) => d,
                 Err(_) => panic!("Open filesystem failed"),
@@ -97,17 +105,18 @@ async fn run_sdcard(
                 Ok(f) => f,
                 Err(_) => panic!("Open file failed"),
             };
-
+            led.set_low(); // set low enables led, high is off
             info!("Entering file write loop. Press K0 to close file");
 
             loop {
-                // yield_now().await;
+                yield_now().await;
                 if switch1.is_low() {
                     info!("Ending capture");
                     break;
                 }
 
                 let buffer = receiver.recv().await;
+
                 led.set_high();
                 if sd_controller
                     .write(&mut volume, &mut file, &buffer)
@@ -116,7 +125,6 @@ async fn run_sdcard(
                 {
                     error!("File write failed")
                 };
-
                 led.set_low();
             }
             if sd_controller.close_file(&volume, file).is_err() {
@@ -138,7 +146,7 @@ async fn run_can(
     mut can: Can<'static, CAN1>,
     led: PA7,
     switch: PE3,
-    sender: Sender<'static, ThreadModeRawMutex, heapless::Vec<u8, 512>, 3>,
+    sender: Sender<'static, NoopRawMutex, heapless::Vec<u8, CHANNELBLOCKSIZE>, CHANNELDEPTH>,
 ) {
     use core::fmt::Write;
 
@@ -153,7 +161,7 @@ async fn run_can(
         .set_silent(false)
         .enable();
 
-    let mut buffer: Vec<u8, 512> = heapless::Vec::new();
+    let mut buffer: Vec<u8, BUFFERSIZE> = heapless::Vec::new();
     let mut go = false;
     let timestamp = embassy_time::Instant::now();
     let mut st: String<90> = String::new();
@@ -162,9 +170,10 @@ async fn run_can(
     warn!("Press K1 to start can");
     loop {
         // don't forget awaits
-        // yield_now().await;
 
         led.set_low();
+        yield_now().await;
+
         if switch.is_low() && enable {
             enable = false;
             warn!("Can disabled");
@@ -187,13 +196,11 @@ async fn run_can(
             info!("Go")
         }
         'inner: {
-            led.set_high();
-
             let frame = match nb::block!(can.receive()) {
                 Ok(f) => f,
                 Err(_) => break 'inner,
             };
-            led.set_low();
+
             if frame.dlc() == 0 || frame.dlc() > 8 {
                 break 'inner;
             }
@@ -204,10 +211,13 @@ async fn run_can(
             if id == 0 {
                 break 'inner;
             }
+
             let data = match frame.data() {
                 Some(d) => d.deref(),
                 None => break 'inner,
             };
+
+            led.set_high();
             if let Err(e) = writeln!(
                 &mut st,
                 "{},{:02x},{:?}",
@@ -217,14 +227,21 @@ async fn run_can(
             ) {
                 warn!("String error {}", defmt::Debug2Format(&e));
             };
-            if buffer
-                .capacity()
-                .saturating_sub(buffer.len())
-                .saturating_sub(st.len())
-                == 0
-            {
-                sender.send(Vec::clone(&buffer)).await;
-                buffer.clear()
+            if buffer.len() > CHANNELBLOCKSIZE {
+                // info!("B: Buf cap {}, buf len {}", buffer.capacity(), buffer.len());
+                let pop: Vec<u8, CHANNELBLOCKSIZE> =
+                    Vec::from_slice(&buffer[0..CHANNELBLOCKSIZE]).unwrap();
+                let len = buffer.capacity().saturating_sub(buffer.len());
+                buffer.truncate(len);
+
+                // info!(
+                //     "A; Buf cap {}, buf len {}, pop len {}",
+                //     buffer.capacity(),
+                //     buffer.len(),
+                //     pop.len()
+                // );
+
+                sender.send(pop).await;
             }
             buffer.extend_from_slice(st.as_bytes()).unwrap();
             st.clear();
@@ -257,15 +274,25 @@ async fn main(spawner: Spawner) -> ! {
     //     Config::default(),
     // );
     let spi = Spi::new(
-        p.SPI1,
-        p.PB3,
-        p.PB5,
-        p.PB4,
-        p.DMA2_CH3,
-        p.DMA2_CH2,
-        Hertz(1_000_000),
+        p.SPI2,
+        p.PB13,
+        p.PB15,
+        p.PB14,
+        p.DMA1_CH4,
+        p.DMA1_CH3,
+        Hertz(10_000_000),
         Config::default(),
     );
+    // let spi = Spi::new(
+    //     p.SPI1,
+    //     p.PB3,
+    //     p.PB5,
+    //     p.PA6,
+    //     p.DMA2_CH3,
+    //     p.DMA2_CH2,
+    //     Hertz(1_000_000),
+    //     Config::default(),
+    // );
     let spi_dev = SdMmcSpi::new(spi, cs);
 
     let rx_pin = Input::new(&mut p.PD0, Pull::Up);
