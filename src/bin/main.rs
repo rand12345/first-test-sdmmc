@@ -9,7 +9,6 @@ use core::ops::Deref;
 
 use bxcan::filter::Mask32;
 use bxcan::Fifo;
-// use can_bit_timings::can_timings_bxcan;
 use defmt::{debug, error, info, panic, warn};
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
@@ -25,14 +24,9 @@ use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex, Threa
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use embedded_alloc::Heap;
-
-// use embedded_hal::can::Frame;
-// use embedded_hal::can::Frame;
-use embedded_sdmmc::SdMmcSpi;
+use embedded_sdmmc::{BlockSpi, Controller, Mode, SdMmcSpi, VolumeIdx};
 use heapless::{Deque, String, Vec};
 use static_cell::StaticCell;
-// use embedded_sdmmc::TimeSource;
-// use kangoo_battery::*;
 use {defmt_rtt as _, panic_probe as _};
 
 #[global_allocator]
@@ -58,13 +52,8 @@ async fn run_sdcard(
     let switch1 = Input::new(switch1, Pull::Up);
     match spi_dev.acquire().await {
         Ok(block) => {
-            use embedded_sdmmc::{Controller, Mode, VolumeIdx};
-
-            let mut sd_controller: embedded_sdmmc::Controller<
-                embedded_sdmmc::BlockSpi<
-                    embassy_stm32::spi::Spi<embassy_stm32::peripherals::SPI3, NoDma, NoDma>,
-                    Output<embassy_stm32::peripherals::PE0>,
-                >,
+            let mut sd_controller: Controller<
+                BlockSpi<Spi<SPI3, NoDma, NoDma>, Output<PE0>>,
                 Clock,
                 4,
                 4,
@@ -75,7 +64,7 @@ async fn run_sdcard(
                 Err(e) => warn!("Err: {:?}", e),
             }
             info!("Volume 0...");
-            match sd_controller.get_volume(embedded_sdmmc::VolumeIdx(0)).await {
+            match sd_controller.get_volume(VolumeIdx(0)).await {
                 Ok(v) => info!("{:?}", v),
                 Err(e) => info!("Err: {:?}", e),
             }
@@ -119,7 +108,6 @@ async fn run_sdcard(
                 };
 
                 led.set_low();
-                // info!("Wrote {} bytes", buffer.len());
             }
             if sd_controller.close_file(&volume, file).is_err() {
                 error!("Close file failed")
@@ -188,13 +176,7 @@ async fn run_can(
             info!("Go")
         }
         'inner: {
-            // yield_now().await;
             led.set_high();
-
-            // let frame = match nb::block!(can.receive()) {
-            //     Ok(f) => f,
-            //     Err(_) => break 'inner,
-            // };
 
             let frame = match nb::block!(can.receive()) {
                 Ok(f) => f,
@@ -230,21 +212,12 @@ async fn run_can(
                 .saturating_sub(st.len())
                 == 0
             {
-                // let mut rx = RX_FRAME.lock().await;
                 if let Ok(output) = Vec::from_slice(&buffer) {
-                    // if rx.push_back(output).is_err() {
-                    //     error!("Push error: queue len {}", rx.len())
-                    // }
                     sender.send(output).await;
-                    // info!("Sent {} bytes", buffer.len())
                 }
-                // led2.set_high();
                 buffer.clear();
             }
             buffer.extend_from_slice(st.as_bytes()).unwrap();
-            // info!("{} buf.len {}", defmt::Debug2Format(&st), buffer.len());
-
-            // led.set_low();
             st.clear();
             break 'inner;
         }
@@ -254,16 +227,12 @@ async fn run_can(
 async fn delay_ms(ms: u64) {
     Timer::after(Duration::from_millis(ms)).await
 }
-// #[entry]
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
     let mut config = embassy_stm32::Config::default();
     config.rcc.sys_ck = Some(mhz(168));
     let mut p = embassy_stm32::init(config);
-    // let mut led1 = Output::new(p.PA6, Level::High, Speed::Low);
-    // let mut led2 = Output::new(p.PA7, Level::High, Speed::Low);
-    // let mut swtich1 = Input::new(p.PE4, Pull::Up);
-    // let mut swtich2 = Input::new(p.PE3, Pull::Up);
     debug!("Can test");
 
     let mut cs = Output::new(p.PE0, Level::High, Speed::VeryHigh);

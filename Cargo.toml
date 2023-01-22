@@ -17,9 +17,6 @@ harness = false
 default = ["defmt"]
 defmt = []
 
-
-
-
 [dependencies]
 anyhow = {version = "1.0.68", default-features = false}
 nb = "1"
