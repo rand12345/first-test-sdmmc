@@ -13,11 +13,9 @@ use defmt::{debug, error, info, panic, unwrap, warn};
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
 use embassy_stm32::can::Can;
-use embassy_stm32::dma::NoDma;
 use embassy_stm32::gpio::{Input, Pull};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::sdmmc::Sdmmc;
-use embassy_stm32::spi::{Config, Spi};
 use embassy_stm32::time::{mhz, Hertz};
 use embassy_stm32::{interrupt, peripherals::*};
 
@@ -27,11 +25,7 @@ use embassy_sync::blocking_mutex::raw::{
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use embedded_alloc::Heap;
-use embedded_sdmmc::{Controller, Mode, VolumeIdx};
-// use embedded_sdmmc_async::{
-//     sdmmc, sdmmc_proto, BlockDevice, BlockSpi, Controller, Mode, SdMmcSpi, TimeSource, Timestamp,
-//     VolumeIdx,
-// };
+use embedded_sdmmc::{Mode, VolumeIdx};
 use heapless::{Deque, String, Vec};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -46,6 +40,7 @@ static HEAP: Heap = Heap::empty();
 const CHANNELDEPTH: usize = 1;
 const CHANNELBLOCKSIZE: usize = 1024;
 const BUFFERSIZE: usize = CHANNELBLOCKSIZE + 256;
+const SDIOMHZ: u32 = 1;
 
 static CHANNEL: StaticCell<
     Channel<NoopRawMutex, heapless::Vec<u8, CHANNELBLOCKSIZE>, CHANNELDEPTH>,
@@ -63,14 +58,21 @@ async fn run_sdcard(
     let switch1 = Input::new(switch1, Pull::Up);
 
     let mut sd_controller = embedded_sdmmc::Controller::new(sdmmc, Clock2);
-
-    led.set_high();
-    let mut volume = match sd_controller.get_volume(VolumeIdx(0)).await {
-        Ok(volume) => volume,
-        Err(e) => {
-            defmt::panic!("Error getting volume: {}", defmt::Debug2Format(&e));
+    let mut volume = loop {
+        led.set_high();
+        let mut volume = match sd_controller.get_volume(VolumeIdx(0)).await {
+            Ok(volume) => Some(volume),
+            Err(e) => {
+                defmt::error!("Error getting volume: {}", defmt::Debug2Format(&e));
+                None
+            }
+        };
+        if switch1.is_low() || volume.is_some() {
+            break volume.unwrap();
         }
+        delay_ms(10).await;
     };
+
     led.set_low();
     let dir = match sd_controller.open_root_dir(&volume) {
         Ok(d) => d,
@@ -83,6 +85,7 @@ async fn run_sdcard(
         Ok(f) => f,
         Err(_) => panic!("Open file failed"),
     };
+
     led.set_low(); // set low enables led, high is off
     info!("Entering file write loop. Press K0 to close file");
 
@@ -236,9 +239,23 @@ async fn main(spawner: Spawner) -> ! {
     let mut p = embassy_stm32::init(config);
     debug!("Can test");
 
-    let irq = interrupt::take!(SDIO);
+    // let pullup = Input::new(&mut p.PD2, Pull::Up);
+    // core::mem::forget(pullup);
+    // let pullup = Input::new(&mut p.PC8, Pull::Up);
+    // core::mem::forget(pullup);
+    // let pullup = Input::new(&mut p.PC9, Pull::Up);
+    // core::mem::forget(pullup);
+    // let pullup = Input::new(&mut p.PC10, Pull::Up);
+    // core::mem::forget(pullup);
+    // let pullup = Input::new(&mut p.PC11, Pull::Up);
+    // core::mem::forget(pullup);
+    // let pullup = Input::new(&mut p.PC12, Pull::Up);
+    // core::mem::forget(pullup);
 
-    // let cs = Output::new(p.PE0, Level::High, Speed::VeryHigh);
+    let rx_pin = Input::new(&mut p.PD0, Pull::Up);
+    core::mem::forget(rx_pin);
+
+    let irq = interrupt::take!(SDIO);
     let mut sdmmc = Sdmmc::new_4bit(
         p.SDIO,
         irq,
@@ -252,16 +269,16 @@ async fn main(spawner: Spawner) -> ! {
         Default::default(),
     );
     loop {
-        match sdmmc.init_card(mhz(1)).await {
+        match sdmmc.init_card(mhz(SDIOMHZ)).await {
             Ok(_) => break,
             Err(_) => delay_ms(1).await,
         }
     }
-    // unwrap!(sdmmc.init_card(mhz(10)).await);
 
-    let rx_pin = Input::new(&mut p.PD0, Pull::Up);
-    core::mem::forget(rx_pin);
-
+    let card = unwrap!(sdmmc.card());
+    info!("{}", defmt::Debug2Format(card));
+    // fork embassy-sdmmc repo, write peek function, verify offset 510, 511 = AA,FF
+    info!("SDMMC clock {}", sdmmc.clock());
     let can = Can::new(p.CAN1, p.PD0, p.PD1);
     let channel = CHANNEL.init(Channel::new());
     info!("Starting Can");
